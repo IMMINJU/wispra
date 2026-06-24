@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>실시간 자막 (EN → KO)</title>
+<style>
+  :root {
+    --bg: #07070b;
+    --fg: #ffffff;
+    --dim: #5b5b66;
+    --accent: #1db954;       /* spotify green */
+    --size: 7vw;             /* current-line font size (overridable) */
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: "Pretendard", -apple-system, system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body { display: flex; flex-direction: column; touch-action: manipulation; }
+
+  /* ---- Top bar (auto-hides while running) ---- */
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top));
+    background: linear-gradient(#07070b, rgba(7,7,11,0));
+    transition: opacity .4s, transform .4s;
+  }
+  #bar.hidden { opacity: 0; transform: translateY(-100%); pointer-events: none; }
+  button {
+    font: inherit; font-weight: 700; font-size: 15px; border: none;
+    border-radius: 999px; padding: 11px 20px; cursor: pointer;
+    background: var(--accent); color: #03210f;
+  }
+  button.ghost { background: #1a1a22; color: var(--fg); }
+  button:disabled { opacity: .35; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #444; flex: 0 0 auto; }
+  #dot.live { background: var(--accent); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  #status { color: var(--dim); font-size: 13px; }
+  .spacer { flex: 1; }
+
+  /* ---- Lyrics stage ---- */
+  #stage {
+    flex: 1; position: relative; overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, transparent, #000 18%, #000 78%, transparent);
+            mask-image: linear-gradient(180deg, transparent, #000 18%, #000 78%, transparent);
+  }
+  /* Anchored at the vertical center of the stage. JS sets --shift each time a
+     new line appears so the CURRENT line's center sits exactly at screen center
+     (spotify-style); past lines glide up above it. */
+  #lines {
+    position: absolute; left: 0; right: 0; top: 50%;
+    display: flex; flex-direction: column; gap: 0;
+    padding: 0 6vw;
+    transform: translateY(var(--shift, 0px));
+    transition: transform .55s cubic-bezier(.22,.61,.36,1); /* the glide */
+    will-change: transform;
+  }
+  /* All lines share ONE font-size (stable layout → offsetTop never drifts).
+     The size difference is done with transform:scale, which doesn't affect
+     layout, so the current-line centering math stays exact during animation. */
+  .line {
+    font-size: var(--size);
+    line-height: 1.28; font-weight: 800; letter-spacing: -.02em;
+    color: var(--dim);
+    opacity: .32;
+    transform: scale(.62);
+    transform-origin: left center;
+    transition: color .45s, opacity .45s, transform .45s;
+    /* scale(.62) leaves ~38% empty box height; pull it back so dimmed lines
+       sit close together instead of looking double-spaced. Not transitioned —
+       layout heights stay stable so the centering math never drifts. */
+    margin: -0.16em 0;
+  }
+  .line.current {
+    color: var(--fg);
+    opacity: 1;
+    transform: scale(1);
+    margin: 0.1em 0;   /* full size → breathing room around the active line */
+  }
+  .line .pending { color: #c9c9d2; font-weight: 800; } /* streaming, not finalized */
+  .line.current .pending { color: #e9e9f0; }
+
+  /* ---- Idle hint ---- */
+  #hint {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    text-align: center; padding: 0 32px; color: var(--dim);
+  }
+  #hint h1 { color: var(--fg); font-size: 22px; margin: 0; font-weight: 800; }
+  #hint p { margin: 0; font-size: 15px; line-height: 1.6; max-width: 420px; }
+  #bigStart {
+    margin-top: 8px; font-size: 17px; padding: 15px 34px;
+  }
+
+  /* landscape phone: bump size */
+  @media (orientation: landscape) and (max-height: 520px) {
+    :root { --size: 8vh; }
+  }
+</style>
+</head>
+<body>
+  <div id="bar" class="hidden">
+    <button id="stop" class="ghost">■ 정지</button>
+    <span id="dot"></span>
+    <span id="status">듣는 중…</span>
+    <span class="spacer"></span>
+    <button id="smaller" class="ghost">A−</button>
+    <button id="bigger" class="ghost">A+</button>
+    <button id="full" class="ghost">⛶</button>
+  </div>
+
+  <div id="stage">
+    <div id="lines"></div>
+    <div id="hint">
+      <h1>실시간 자막 · EN → KO</h1>
+      <p>발표자의 영어를 폰 마이크로 듣고 한국어 자막을 흘려줍니다.
+         폰을 발표자 쪽으로 향하게 두고, <b>가로로 눕히면</b> 더 잘 보여요.</p>
+      <button id="bigStart">▶ 시작하기</button>
+      <button id="demoStart" class="ghost" style="margin-top:4px">▷ 데모 보기 (샘플 음성)</button>
+    </div>
+  </div>
+
+<script type="module">
+const $ = (s) => document.querySelector(s);
+const bar = $("#bar"), dot = $("#dot"), statusEl = $("#status");
+const linesEl = $("#lines"), hint = $("#hint"), stage = $("#stage");
+
+const OPENAI_WS = "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
+const MAX_LINES = 6;          // lines kept in the DOM
+let rootSize = 7;             // vw, adjustable
+
+let ws, audioCtx, workletNode, micStream;
+let fullText = "";            // text already SHOWN on screen
+let pendingQueue = "";        // text received but not yet revealed (the buffer)
+let idleTimer = null;
+
+// recording + transcript capture (for download on stop)
+let recorder = null, recChunks = [];
+let transcript = [];          // { t: secondsFromStart, text }
+let sessionStart = 0;
+
+// ---- font size controls ----
+function applySize() {
+  document.documentElement.style.setProperty("--size", rootSize + "vw");
+  relayout(); // size change alters where text wraps → re-wrap and re-center
+}
+$("#bigger").onclick  = () => { rootSize = Math.min(14, rootSize + 0.8); applySize(); };
+$("#smaller").onclick = () => { rootSize = Math.max(3.5, rootSize - 0.8); applySize(); };
+$("#full").onclick = () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen();
+};
+
+// ---- auto-hide top bar ----
+function pokeBar() {
+  bar.classList.remove("hidden");
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => bar.classList.add("hidden"), 3000);
+}
+stage.addEventListener("pointerdown", pokeBar);
+
+function setStatus(t, live = false) { statusEl.textContent = t; dot.classList.toggle("live", live); }
+
+// ---- subtitle engine ----
+// ONE growing buffer (`fullText`) is the only source of truth — we NEVER slice
+// it, so no character can ever be lost. To render, we let the browser wrap the
+// text naturally, detect where each VISUAL line breaks (by word offsetTop), and
+// rebuild the .line divs. Last visual line = current (bright/centered), lines
+// above dim & shrink and glide up — exactly the existing CSS effect.
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+// ---- paced reveal queue ----
+// Deltas arrive in bursts (and the whole tail dumps at once on session.close).
+// To keep subtitles smooth we DON'T render on arrival — we push text into a
+// queue and reveal it at a steady pace (chars/sec), speeding up only when the
+// backlog grows so captions never fall far behind the speaker. This is how live
+// captioning (YouTube, etc.) stays readable.
+const BASE_CPS = 14;          // baseline reveal speed (chars/sec)
+const CATCHUP_AT = 25;        // if more than this many chars are waiting, speed up
+const MAX_CPS = 55;           // ceiling when catching up
+let drainRAF = 0, lastDrain = 0, drainAcc = 0;
+
+function enqueueText(chunk) {
+  if (!chunk) return;
+  pendingQueue += chunk;
+  if (!drainRAF) { lastDrain = 0; drainRAF = requestAnimationFrame(drainQueue); }
+}
+
+function drainQueue(now) {
+  if (!lastDrain) lastDrain = now;
+  const dt = (now - lastDrain) / 1000;
+  lastDrain = now;
+
+  // reveal faster when the backlog is large, so we don't lag the speaker
+  const backlog = pendingQueue.length;
+  const cps = backlog > CATCHUP_AT
+    ? Math.min(MAX_CPS, BASE_CPS + (backlog - CATCHUP_AT) * 2)
+    : BASE_CPS;
+
+  drainAcc += cps * dt;
+  let n = Math.floor(drainAcc);
+  if (n > 0 && backlog > 0) {
+    n = Math.min(n, backlog);
+    drainAcc -= n;
+    fullText += pendingQueue.slice(0, n);
+    pendingQueue = pendingQueue.slice(n);
+    relayout();
+  }
+
+  if (pendingQueue.length > 0) {
+    drainRAF = requestAnimationFrame(drainQueue);
+  } else {
+    drainRAF = 0; drainAcc = 0;
+  }
+}
+
+// Drain everything instantly (used when tearing down so nothing is lost).
+function flushQueueNow() {
+  if (pendingQueue) { fullText += pendingQueue; pendingQueue = ""; relayout(); }
+  if (drainRAF) { cancelAnimationFrame(drainRAF); drainRAF = 0; }
+}
+
+let relayoutRAF = 0;
+function relayout() {
+  cancelAnimationFrame(relayoutRAF);
+  relayoutRAF = requestAnimationFrame(() => {
+    const lines = wrapIntoLines(fullText);
+    renderLines(lines);
+  });
+}
+
+// Measure where the browser naturally wraps `text` at the current line width.
+// Returns an array of strings, one per visual line. Loses no characters: every
+// token (word or whitespace run) is preserved and only grouped.
+let measurer = null;
+function wrapIntoLines(text) {
+  if (!measurer) {
+    measurer = document.createElement("div");
+    measurer.setAttribute("aria-hidden", "true");
+    measurer.style.cssText =
+      "position:absolute;visibility:hidden;left:0;right:0;padding:0 6vw;" +
+      "font-weight:800;letter-spacing:-.02em;line-height:1.28;white-space:normal;";
+    stage.appendChild(measurer);
+  }
+  // match the current line font metrics
+  measurer.style.fontSize = getComputedStyle(document.documentElement).getPropertyValue("--size");
+
+  // split into words but KEEP the trailing spaces attached so nothing is dropped
+  const tokens = text.match(/\S+\s*/g) || [];
+  measurer.innerHTML = tokens.map((t) => `<span>${esc(t)}</span>`).join("");
+  const spans = measurer.children;
+
+  const lines = [];
+  let cur = "", lastTop = null;
+  for (let i = 0; i < spans.length; i++) {
+    const top = spans[i].offsetTop;
+    if (lastTop !== null && top > lastTop) { lines.push(cur); cur = ""; } // wrapped
+    cur += tokens[i];
+    lastTop = top;
+  }
+  if (cur) lines.push(cur);
+  return lines.map((l) => l.replace(/\s+$/, "")); // trim trailing space per line
+}
+
+let prevLineCount = 0;
+function renderLines(lines) {
+  const shown = lines.slice(-MAX_LINES);     // keep only the last N visual lines
+  // rebuild line divs
+  linesEl.innerHTML = "";
+  shown.forEach((text, i) => {
+    const div = document.createElement("div");
+    div.className = "line" + (i === shown.length - 1 ? " current" : "");
+    div.textContent = text;
+    linesEl.appendChild(div);
+  });
+  // animate the glide only when the number of lines changed (a real line break);
+  // otherwise (current line just grew) snap instantly so it tracks center.
+  centerCurrent(lines.length !== prevLineCount);
+  prevLineCount = lines.length;
+}
+
+// Pin the CURRENT (last) line's center to the stage center (spotify-style).
+// animate=true → glide via CSS transition; animate=false → snap (no lag).
+let centerRAF = 0;
+function centerCurrent(animate) {
+  const cur = linesEl.querySelector(".line.current");
+  if (!cur) return;
+  cancelAnimationFrame(centerRAF);
+  centerRAF = requestAnimationFrame(() => {
+    const c = linesEl.querySelector(".line.current");
+    if (!c) return;
+    // Place the current line slightly ABOVE the stage's vertical center —
+    // subtitles read more comfortably a bit high. Bias = 12% of stage height up.
+    const bias = stage.clientHeight * 0.12;
+    const shift = -(c.offsetTop + c.offsetHeight / 2) - bias;
+    if (animate) {
+      linesEl.style.setProperty("--shift", shift + "px");
+    } else {
+      const prev = linesEl.style.transition;
+      linesEl.style.transition = "none";
+      linesEl.style.setProperty("--shift", shift + "px");
+      void linesEl.offsetHeight;
+      linesEl.style.transition = prev;
+    }
+  });
+}
+
+// Save the full translation for the .txt download (called on stop).
+// Includes anything still queued so the memo is complete even if the on-screen
+// reveal hasn't caught up yet.
+function snapshotTranscript() {
+  const text = (fullText + pendingQueue).trim();
+  if (text) transcript = [{ t: 0, text }];
+}
+
+// ---- connection ----
+// demo=true streams a bundled English sample (sample.pcm) instead of the mic,
+// so you can see the subtitles render with no microphone / no speaker.
+async function start(demo = false) {
+  $("#bigStart").disabled = true;
+  $("#demoStart") && ($("#demoStart").disabled = true);
+  setStatus(demo ? "데모 준비 중…" : "연결 중…");
+  try {
+    // 1) get an ephemeral token from our Vercel function (key stays server-side)
+    const tokenRes = await fetch("/api/token");
+    if (!tokenRes.ok) throw new Error("토큰 발급 실패 (" + tokenRes.status + ")");
+    const { token, error } = await tokenRes.json();
+    if (error) throw new Error(error);
+
+    // 2) open WebSocket straight to OpenAI; auth via subprotocol (browsers
+    //    cannot set Authorization headers).
+    ws = new WebSocket(OPENAI_WS, ["realtime", "openai-insecure-api-key." + token]);
+
+    ws.onopen = () => {
+      // Confirm target language after the socket opens (it's also set at token
+      // creation). Minimal payload — verified working against the live API.
+      ws.send(JSON.stringify({
+        type: "session.update",
+        session: { audio: { output: { language: "ko" } } },
+      }));
+      if (demo) playDemo().catch((e) => setStatus("데모 오류: " + e.message));
+      else startMic().catch((e) => setStatus("마이크 오류: " + e.message));
+    };
+
+    ws.onmessage = (e) => {
+      let evt; try { evt = JSON.parse(e.data); } catch { return; }
+      switch (evt.type) {
+        case "session.updated":
+          setStatus("듣는 중…", true);
+          break;
+        case "session.output_transcript.delta":
+          // Queue it; the paced drain loop reveals it smoothly (no sentence
+          // parsing, so no character can be dropped at a boundary).
+          enqueueText(evt.delta ?? "");
+          break;
+        case "session.output_transcript.done":
+        case "session.output_transcript.completed": {
+          // The model sometimes sends a clean final transcript — if it's longer
+          // than everything we have (shown + queued), queue the remainder.
+          const have = fullText.length + pendingQueue.length;
+          if (evt.transcript && evt.transcript.length > have) {
+            enqueueText(evt.transcript.slice(have));
+          }
+          break;
+        }
+        case "session.closed":
+          // All pending translation has been flushed — the stream is complete.
+          setStatus("완료", false);
+          if (onClosed) { onClosed(); onClosed = null; }
+          break;
+        case "error":
+          setStatus("오류: " + (evt.error?.message ?? "unknown"));
+          break;
+      }
+    };
+    ws.onerror = () => setStatus("연결 오류");
+    ws.onclose = () => { setStatus("세션 종료됨"); stopMic(); };
+
+    // reveal stage
+    hint.style.display = "none";
+    fullText = ""; pendingQueue = ""; prevLineCount = 0; linesEl.innerHTML = "";
+    if (drainRAF) { cancelAnimationFrame(drainRAF); drainRAF = 0; }
+    drainAcc = 0; lastDrain = 0;
+    closeSent = false; onClosed = null;
+    pokeBar();
+  } catch (e) {
+    setStatus(e.message);
+    $("#bigStart").disabled = false;
+  }
+}
+
+// stream the bundled English sample through the same pipeline as the mic
+async function playDemo() {
+  setStatus("데모 재생 중…", true);
+  sessionStart = performance.now();
+  transcript = [];
+  const res = await fetch("/sample.pcm");
+  if (!res.ok) throw new Error("sample.pcm 없음 (npm run sample 후 public으로 복사)");
+  const pcm = new Uint8Array(await res.arrayBuffer());
+  const RATE = 24000, MS = 40, BYTES = (RATE * 2 * MS) / 1000; // 40ms slices
+  for (let off = 0; off < pcm.length; off += BYTES) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return; // stopped early
+    const slice = pcm.subarray(off, Math.min(off + BYTES, pcm.length));
+    ws.send(JSON.stringify({ type: "session.input_audio_buffer.append", audio: b64(slice) }));
+    await new Promise((r) => setTimeout(r, MS));
+  }
+  // Tell the model the input is finished so it flushes the LAST sentence.
+  // Translation sessions hold the final segment until they get session.close
+  // (they keep waiting for more audio otherwise). The server then emits the
+  // remaining transcript deltas and finally session.closed.
+  setStatus("데모 전송 완료 · 마무리 번역…", true);
+  await closeTranslation();   // resolves on session.closed (status → "완료")
+}
+
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+  });
+
+  // shared time origin for the recording and the transcript timestamps
+  sessionStart = performance.now();
+  transcript = [];
+
+  // record the ORIGINAL mic audio (best quality) for download on stop
+  recChunks = [];
+  recorder = null;
+  try {
+    const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+      .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+    if (mime) {
+      recorder = new MediaRecorder(micStream, { mimeType: mime });
+      recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+      recorder.start(1000); // gather in 1s slices so nothing is lost on stop
+    }
+  } catch (e) {
+    console.warn("recording unavailable:", e.message); // translation still works
+  }
+
+  audioCtx = new AudioContext();
+  await audioCtx.audioWorklet.addModule("/pcm-worklet.js");
+  const src = audioCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(audioCtx, "pcm-worklet");
+  workletNode.port.onmessage = (e) => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "session.input_audio_buffer.append", audio: b64(e.data) }));
+    }
+  };
+  src.connect(workletNode);
+  workletNode.connect(audioCtx.destination); // keep graph alive (no audible output)
+}
+
+function stopMic() {
+  try { workletNode?.disconnect(); } catch {}
+  try { micStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  try { audioCtx?.close(); } catch {}
+}
+
+// Send session.close so the model flushes its last sentence, and resolve once
+// session.closed arrives (or after a 4s safety timeout). Safe to call twice.
+let onClosed = null, closeSent = false;
+function closeTranslation() {
+  return new Promise((resolve) => {
+    if (closeSent || !ws || ws.readyState !== WebSocket.OPEN) return resolve();
+    closeSent = true;
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    onClosed = finish;
+    try { ws.send(JSON.stringify({ type: "session.close" })); } catch { return finish(); }
+    setTimeout(finish, 4000); // don't hang if the event never comes
+  });
+}
+
+async function stop() {
+  setStatus("마무리 번역…");
+  // 0) stop capturing, then tell the model input is done so it flushes the last
+  //    sentence, and wait for that final transcript before we snapshot/save.
+  stopMic();
+  await closeTranslation();
+  // 1) snapshot the (now complete) translation for the .txt memo, then reveal
+  //    anything still queued so the final on-screen text is complete too.
+  snapshotTranscript();
+  flushQueueNow();
+  setStatus("저장 중…");
+  // 2) flush the recorder and wait for the final blob before tearing down
+  const audioBlob = await finishRecording();
+  if (ws?.readyState === WebSocket.OPEN) ws.close();
+
+  // 2) build a filename stamp like 20260629-1612
+  const stamp = fileStamp();
+
+  // 3) save the Korean transcript memo (.txt)
+  if (transcript.length) {
+    const memo = buildMemo();
+    download(new Blob([memo], { type: "text/plain;charset=utf-8" }), `자막-${stamp}.txt`);
+  }
+  // 4) save the original recording, if we captured any
+  if (audioBlob && audioBlob.size) {
+    const ext = audioBlob.type.includes("mp4") ? "mp4" : "webm";
+    download(audioBlob, `녹음-${stamp}.${ext}`);
+  }
+
+  setStatus(transcript.length || (audioBlob && audioBlob.size) ? "저장 완료 · 정지됨" : "정지됨");
+  $("#bigStart").disabled = false;
+  if ($("#demoStart")) $("#demoStart").disabled = false;
+  hint.style.display = "flex";
+}
+
+// resolve to the recorded Blob once MediaRecorder has flushed its last chunk
+function finishRecording() {
+  return new Promise((resolve) => {
+    if (!recorder || recorder.state === "inactive") {
+      resolve(recChunks.length ? new Blob(recChunks, { type: recChunks[0].type }) : null);
+      return;
+    }
+    recorder.onstop = () =>
+      resolve(recChunks.length ? new Blob(recChunks, { type: recChunks[0].type }) : null);
+    try { recorder.stop(); } catch { resolve(null); }
+  });
+}
+
+function buildMemo() {
+  const header = `실시간 자막 기록 — ${dateStamp()}\n${"=".repeat(40)}\n\n`;
+  const body = transcript.map((l) => l.text).join("\n");
+  return header + body + "\n";
+}
+
+// ---- small helpers ----
+function two(n) { return String(n).padStart(2, "0"); }
+function dateStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+function fileStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}`;
+}
+function download(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// accepts an ArrayBuffer or a typed-array view
+function b64(buf) {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = ""; const C = 0x8000;
+  for (let i = 0; i < bytes.length; i += C) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + C));
+  return btoa(bin);
+}
+
+$("#bigStart").onclick = () => start(false);
+$("#demoStart").onclick = () => start(true);
+$("#stop").onclick = stop;
+
+// re-center when the viewport changes (rotate / resize) — snap, no glide
+addEventListener("resize", () => relayout());
+addEventListener("orientationchange", () => setTimeout(() => relayout(), 300));
+</script>
+</body>
+</html>

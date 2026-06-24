@@ -1,0 +1,15 @@
+{
+  "name": "live-translate",
+  "version": "1.0.0",
+  "description": "Real-time EN->KO subtitle tool for live events (OpenAI gpt-realtime-translate)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "sample": "node harness/make-sample.js",
+    "verify": "node harness/verify.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  }
+}
