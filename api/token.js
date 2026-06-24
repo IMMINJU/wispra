@@ -28,7 +28,12 @@ export default async function handler(req, res) {
         expires_after: { anchor: "created_at", seconds: 600 },
         session: {
           model: "gpt-realtime-translate",
-          audio: { output: { language: process.env.TARGET_LANG || "ko" } },
+          audio: {
+            // far_field = a phone / room mic capturing a distant speaker. Cleans
+            // the input before VAD + the model, improving recognition accuracy.
+            input: { noise_reduction: { type: "far_field" } },
+            output: { language: process.env.TARGET_LANG || "ko" },
+          },
         },
       }),
     });

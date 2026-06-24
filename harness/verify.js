@@ -49,7 +49,10 @@ const tokRes = await fetch("https://api.openai.com/v1/realtime/translations/clie
     expires_after: { anchor: "created_at", seconds: 600 },
     session: {
       model: "gpt-realtime-translate",
-      audio: { output: { language: "ko" } }, // target language set at creation
+      audio: {
+        input: { noise_reduction: { type: "far_field" } }, // match the app
+        output: { language: "ko" },                        // target language
+      },
     },
   }),
 });

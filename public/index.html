@@ -195,9 +195,9 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt
 // queue and reveal it at a steady pace (chars/sec), speeding up only when the
 // backlog grows so captions never fall far behind the speaker. This is how live
 // captioning (YouTube, etc.) stays readable.
-const BASE_CPS = 14;          // baseline reveal speed (chars/sec)
-const CATCHUP_AT = 25;        // if more than this many chars are waiting, speed up
-const MAX_CPS = 55;           // ceiling when catching up
+const BASE_CPS = 20;          // baseline reveal speed (chars/sec) — was 14; higher tracks the speaker closer
+const CATCHUP_AT = 12;        // start speeding up sooner — was 25 — so captions don't fall behind
+const MAX_CPS = 60;           // ceiling when catching up
 let drainRAF = 0, lastDrain = 0, drainAcc = 0;
 
 function enqueueText(chunk) {
@@ -456,7 +456,12 @@ async function startMic() {
     console.warn("recording unavailable:", e.message); // translation still works
   }
 
-  audioCtx = new AudioContext();
+  // Ask for a 24 kHz context so the BROWSER resamples (high quality, anti-aliased)
+  // rather than the worklet's cheap linear downsample — fewer aliasing artifacts
+  // reaching the model. Falls back to the default rate if unsupported; the worklet
+  // still downsamples whatever rate it receives.
+  try { audioCtx = new AudioContext({ sampleRate: 24000 }); }
+  catch { audioCtx = new AudioContext(); }
   await audioCtx.audioWorklet.addModule("/pcm-worklet.js");
   const src = audioCtx.createMediaStreamSource(micStream);
   workletNode = new AudioWorkletNode(audioCtx, "pcm-worklet");
