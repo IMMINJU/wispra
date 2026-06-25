@@ -8,13 +8,13 @@
 <meta name="apple-mobile-web-app-title" content="wispra" />
 <meta name="theme-color" content="#07070b" />
 
-<title>wispra — 실시간 영어→한국어 자막</title>
-<meta name="description" content="영어 발화를 실시간으로 한국어 자막으로 띄우는 웹앱. 마이크로 들어온 영어를 OpenAI로 번역해 스포티파이 가사처럼 흐르는 자막을 보여줍니다." />
+<title>wispra — 실시간 영어↔한국어 통역 자막</title>
+<meta name="description" content="영어와 한국어를 양방향으로 실시간 통역해 자막으로 띄우는 웹앱. 마이크 하나로 두 사람의 대화를 듣고, 말한 언어를 자동 감지해 상대 언어 자막을 스포티파이 가사처럼 흘려줍니다." />
 
 <!-- Open Graph / social -->
 <meta property="og:type" content="website" />
-<meta property="og:title" content="wispra — 실시간 영어→한국어 자막" />
-<meta property="og:description" content="발표자의 영어를 마이크로 듣고 한국어 자막을 실시간으로 띄우는 웹앱." />
+<meta property="og:title" content="wispra — 실시간 영어↔한국어 통역 자막" />
+<meta property="og:description" content="마이크 하나로 두 사람의 영어·한국어 대화를 듣고 양방향으로 통역 자막을 띄우는 웹앱." />
 <meta name="twitter:card" content="summary" />
 
 <!-- Inline emoji favicon (no image file needed) -->
@@ -25,6 +25,12 @@
     --fg: #ffffff;
     --dim: #5b5b66;
     --accent: #1db954;       /* spotify green */
+    /* Per-speaker tints for the current (bright) line. Two people share one mic;
+       the language they SPOKE picks the color, so each side is easy to track:
+         --spk-en  = English was spoken → Korean subtitle  (green)
+         --spk-ko  = Korean was spoken  → English subtitle  (blue) */
+    --spk-en: #38e08c;
+    --spk-ko: #5aa9ff;
     --size: 7vw;             /* current-line font size (overridable) */
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -52,6 +58,20 @@
   }
   button.ghost { background: #1a1a22; color: var(--fg); }
   button:disabled { opacity: .35; }
+  /* Direction toggle: fixed bottom-center, ALWAYS visible (outside the auto-
+     hiding bar) and colored by the active mode so the direction is obvious. */
+  #dir {
+    position: fixed; z-index: 11; display: none;   /* shown only while running */
+    left: 50%; transform: translateX(-50%);
+    bottom: max(18px, env(safe-area-inset-bottom));
+    font-size: 14px; padding: 11px 22px; letter-spacing: .03em;
+    box-shadow: 0 4px 18px rgba(0,0,0,.5);
+  }
+  #dir.on { display: inline-block; }
+  #dir::before { content: "⇄ "; opacity: .7; font-weight: 700; }
+  #dir.en2ko { background: var(--spk-en); color: #03210f; }   /* showing KO subs */
+  #dir.ko2en { background: var(--spk-ko); color: #051427; }   /* showing EN subs */
+  /* idle hint sits behind the toggle, so the button is never overlapped */
   #dot { width: 9px; height: 9px; border-radius: 50%; background: #444; flex: 0 0 auto; }
   #dot.live { background: var(--accent); animation: pulse 1.6s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
@@ -97,8 +117,13 @@
     transform: scale(1);
     margin: 0.1em 0;   /* full size → breathing room around the active line */
   }
-  .line .pending { color: #c9c9d2; font-weight: 800; } /* streaming, not finalized */
-  .line.current .pending { color: #e9e9f0; }
+  /* Speaker tint. Dimmed (past) lines keep a faint tint so you can still tell
+     who said what as they scroll up; the current line shows the full color. */
+  .line.spk-en { color: #2c5e45; }            /* dimmed: muted green */
+  .line.spk-ko { color: #2f4a6b; }            /* dimmed: muted blue  */
+  .line.current.spk-en { color: var(--spk-en); }
+  .line.current.spk-ko { color: var(--spk-ko); }
+  .line .pending { opacity: .72; font-weight: 800; } /* streaming, not finalized */
 
   /* ---- Idle hint ---- */
   #hint {
@@ -108,6 +133,10 @@
   }
   #hint h1 { color: var(--fg); font-size: 22px; margin: 0; font-weight: 800; }
   #hint p { margin: 0; font-size: 15px; line-height: 1.6; max-width: 420px; }
+  #legend { font-size: 13px; color: var(--dim); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
+  .sw-en { background: var(--spk-en); }
+  .sw-ko { background: var(--spk-ko); }
   #bigStart {
     margin-top: 8px; font-size: 17px; padding: 15px 34px;
   }
@@ -129,12 +158,24 @@
     <button id="full" class="ghost">⛶</button>
   </div>
 
+  <!-- Direction toggle lives OUTSIDE the auto-hiding bar so it stays tappable
+       the whole time. Bottom-center = thumb-reachable while talking. -->
+  <button id="dir" title="표시 방향 전환 (말하는 사람이 바뀌면 누르세요)">EN→KO</button>
+
   <div id="stage">
     <div id="lines"></div>
     <div id="hint">
-      <h1>실시간 자막 · EN → KO</h1>
-      <p>발표자의 영어를 폰 마이크로 듣고 한국어 자막을 흘려줍니다.
-         폰을 발표자 쪽으로 향하게 두고, <b>가로로 눕히면</b> 더 잘 보여요.</p>
+      <h1>실시간 통역 자막 · EN ↔ KO</h1>
+      <p>마이크 하나로 <b>두 사람의 대화</b>를 듣고, 말한 언어를 자동으로 감지해
+         상대 언어 자막을 흘려줍니다. 폰/노트북을 둘 사이에 두고
+         <b>가로로 눕히면</b> 더 잘 보여요.</p>
+      <p id="legend">
+        <span class="sw sw-en"></span> 영어로 말하면 → 한국어 자막
+        &nbsp;&nbsp;
+        <span class="sw sw-ko"></span> 한국어로 말하면 → 영어 자막
+      </p>
+      <p id="legend">아래 <b>방향 버튼</b>(EN→KO ⇄ KO→EN)으로 표시할 방향을
+        고르세요. 말하는 사람이 바뀌면 눌러서 전환하면 됩니다.</p>
       <button id="bigStart">▶ 시작하기</button>
       <button id="demoStart" class="ghost" style="margin-top:4px">▷ 데모 보기 (샘플 음성)</button>
     </div>
@@ -149,14 +190,23 @@ const OPENAI_WS = "wss://api.openai.com/v1/realtime/translations?model=gpt-realt
 const MAX_LINES = 6;          // lines kept in the DOM
 let rootSize = 7;             // vw, adjustable
 
-let ws, audioCtx, workletNode, micStream;
-let fullText = "";            // text already SHOWN on screen
-let pendingQueue = "";        // text received but not yet revealed (the buffer)
+let audioCtx, workletNode, micStream;
+let demoAudioCtx = null, demoSource = null;   // speaker playback during the demo
 let idleTimer = null;
+
+// ---- bidirectional sessions ----
+// Two OpenAI translation sessions run at once, fed the SAME mic audio:
+//   sessions.ko  → outputs Korean  (fires when ENGLISH is spoken)
+//   sessions.en  → outputs English (fires when KOREAN is spoken)
+// OpenAI auto-detects the spoken language; whichever session's output language
+// differs from the speech does the translating. Subtitles are colored by the
+// actual script of each line (see speakerOf), so the stream reads as one flowing,
+// color-coded conversation regardless of which session produced a given line.
+const SESS = [{ out: "ko" }, { out: "en" }];
+const sessions = {};          // out-lang → session object
 
 // recording + transcript capture (for download on stop)
 let recorder = null, recChunks = [];
-let transcript = [];          // { t: secondsFromStart, text }
 let sessionStart = 0;
 
 // ---- font size controls ----
@@ -171,6 +221,33 @@ $("#full").onclick = () => {
   else document.exitFullscreen();
 };
 
+// ---- direction toggle ----
+// Audio always goes to BOTH sessions (no switching latency); this only controls
+// which direction is DISPLAYED. Tapping flips EN→KO ⇄ KO→EN. Showing a single
+// direction hides the other session's output, which removes both the same-
+// language echo and the word-by-word interleaving when both fire at once.
+//   en2ko → show only the ko-output session (English was spoken → Korean subs)
+//   ko2en → show only the en-output session (Korean was spoken → English subs)
+const DIR_MODES = ["en2ko", "ko2en"];
+const DIR_LABEL = { en2ko: "EN→KO", ko2en: "KO→EN" };
+const DIR_SHOWS = { en2ko: "ko", ko2en: "en" }; // which out-lang each mode displays
+let dirMode = "en2ko";
+const dirBtn = $("#dir");
+function applyDir() {
+  dirBtn.textContent = DIR_LABEL[dirMode];
+  // keep the .on visibility flag; just swap the color class (.en2ko / .ko2en)
+  dirBtn.classList.remove("en2ko", "ko2en");
+  dirBtn.classList.add(dirMode);
+  relayout();                          // re-render with the new filter immediately
+}
+dirBtn.onclick = () => {
+  dirMode = DIR_MODES[(DIR_MODES.indexOf(dirMode) + 1) % DIR_MODES.length];
+  applyDir();
+};
+// is a segment from the session we're currently displaying? Demo and mic both
+// follow the toggle (default EN→KO), so one direction shows at a time.
+const dirVisible = (out) => DIR_SHOWS[dirMode] === out;
+
 // ---- auto-hide top bar ----
 function pokeBar() {
   bar.classList.remove("hidden");
@@ -181,29 +258,78 @@ stage.addEventListener("pointerdown", pokeBar);
 
 function setStatus(t, live = false) { statusEl.textContent = t; dot.classList.toggle("live", live); }
 
-// ---- subtitle engine ----
-// ONE growing buffer (`fullText`) is the only source of truth — we NEVER slice
-// it, so no character can ever be lost. To render, we let the browser wrap the
-// text naturally, detect where each VISUAL line breaks (by word offsetTop), and
-// rebuild the .line divs. Last visual line = current (bright/centered), lines
-// above dim & shrink and glide up — exactly the existing CSS effect.
+// ---- subtitle engine (segment-based, bidirectional) ----
+// SOURCE OF TRUTH: an ordered list of segments, one per session-turn:
+//   { out:"ko"|"en", shown:"", pending:"" }
+// `shown`+`pending` is everything received for that turn; we never drop a char.
+// A delta extends the current segment if it's from the SAME session and still
+// open; a different session (or a closed turn) starts a new segment. Separate
+// segments mean two sessions emitting at once never interleave into one word.
+//
+// COLOR BY ACTUAL SCRIPT (not by session): each visual line is colored from the
+// text it actually contains — Hangul → green (Korean subtitle = English was
+// spoken), Latin → blue (English subtitle = Korean was spoken). This is robust
+// to a quirk found in live testing: gpt-realtime-translate sometimes does NOT
+// stay silent on same-language speech and echoes the source back. We currently
+// SHOW both sessions' output; coloring by script keeps each line's color correct
+// (a Korean echo still reads as a Korean line, etc.) rather than mislabeling it.
 const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+const HANGUL = /[가-힣ᄀ-ᇿ㄰-㆏]/;
+const hasHangul = (s) => HANGUL.test(s);
+// Which speaker-color a piece of text belongs to, by its dominant script.
+// Hangul present → it's a Korean subtitle (en speaker); else English (ko speaker).
+const speakerOf = (text) => (hasHangul(text) ? "en" : "ko");
+
+let segments = [];            // [{ out, shown, pending }]
+let curSeg = null;            // the open segment deltas currently append to
+
+// Append a delta from the session whose output language is `out`.
+// Starts a new segment when the producing session changes.
+function pushDelta(out, chunk) {
+  if (!chunk) return;
+  if (!curSeg || curSeg.out !== out) {
+    curSeg = { out, shown: "", pending: "" };
+    segments.push(curSeg);
+  }
+  curSeg.pending += chunk;
+  kickDrain();
+}
+
+// Close the current turn so the NEXT delta (even same session) starts fresh.
+// Called on a session's transcript "done" so distinct utterances stay separate.
+function endSegment(out) {
+  if (curSeg && curSeg.out === out) curSeg = null;
+}
 
 // ---- paced reveal queue ----
 // Deltas arrive in bursts (and the whole tail dumps at once on session.close).
-// To keep subtitles smooth we DON'T render on arrival — we push text into a
-// queue and reveal it at a steady pace (chars/sec), speeding up only when the
-// backlog grows so captions never fall far behind the speaker. This is how live
-// captioning (YouTube, etc.) stays readable.
-const BASE_CPS = 20;          // baseline reveal speed (chars/sec) — was 14; higher tracks the speaker closer
-const CATCHUP_AT = 12;        // start speeding up sooner — was 25 — so captions don't fall behind
+// We DON'T render on arrival — text sits in each segment's `pending` and is
+// revealed at a steady pace (chars/sec), speeding up when the backlog grows so
+// captions never fall far behind the speaker (how live captioning stays readable).
+const BASE_CPS = 20;          // baseline reveal speed (chars/sec)
+const CATCHUP_AT = 12;        // start speeding up once this many chars are waiting
 const MAX_CPS = 60;           // ceiling when catching up
 let drainRAF = 0, lastDrain = 0, drainAcc = 0;
 
-function enqueueText(chunk) {
-  if (!chunk) return;
-  pendingQueue += chunk;
+const totalPending = () => segments.reduce((n, s) => n + s.pending.length, 0);
+
+function kickDrain() {
   if (!drainRAF) { lastDrain = 0; drainRAF = requestAnimationFrame(drainQueue); }
+}
+
+// Move up to `n` chars from pending→shown, oldest segment first (preserves order).
+function reveal(n) {
+  let moved = false;
+  for (const s of segments) {
+    if (n <= 0) break;
+    if (!s.pending) continue;
+    const take = Math.min(n, s.pending.length);
+    s.shown += s.pending.slice(0, take);
+    s.pending = s.pending.slice(take);
+    n -= take; moved = true;
+  }
+  if (moved) relayout();
 }
 
 function drainQueue(now) {
@@ -211,8 +337,7 @@ function drainQueue(now) {
   const dt = (now - lastDrain) / 1000;
   lastDrain = now;
 
-  // reveal faster when the backlog is large, so we don't lag the speaker
-  const backlog = pendingQueue.length;
+  const backlog = totalPending();
   const cps = backlog > CATCHUP_AT
     ? Math.min(MAX_CPS, BASE_CPS + (backlog - CATCHUP_AT) * 2)
     : BASE_CPS;
@@ -222,21 +347,21 @@ function drainQueue(now) {
   if (n > 0 && backlog > 0) {
     n = Math.min(n, backlog);
     drainAcc -= n;
-    fullText += pendingQueue.slice(0, n);
-    pendingQueue = pendingQueue.slice(n);
-    relayout();
+    reveal(n);
   }
 
-  if (pendingQueue.length > 0) {
+  if (totalPending() > 0) {
     drainRAF = requestAnimationFrame(drainQueue);
   } else {
     drainRAF = 0; drainAcc = 0;
   }
 }
 
-// Drain everything instantly (used when tearing down so nothing is lost).
+// Reveal everything instantly (used when tearing down so nothing is lost).
 function flushQueueNow() {
-  if (pendingQueue) { fullText += pendingQueue; pendingQueue = ""; relayout(); }
+  let moved = false;
+  for (const s of segments) if (s.pending) { s.shown += s.pending; s.pending = ""; moved = true; }
+  if (moved) relayout();
   if (drainRAF) { cancelAnimationFrame(drainRAF); drainRAF = 0; }
 }
 
@@ -244,16 +369,15 @@ let relayoutRAF = 0;
 function relayout() {
   cancelAnimationFrame(relayoutRAF);
   relayoutRAF = requestAnimationFrame(() => {
-    const lines = wrapIntoLines(fullText);
-    renderLines(lines);
+    renderLines(wrapAllSegments());
   });
 }
 
-// Measure where the browser naturally wraps `text` at the current line width.
-// Returns an array of strings, one per visual line. Loses no characters: every
-// token (word or whitespace run) is preserved and only grouped.
+// Measure where the browser naturally wraps each segment at the current width,
+// keeping each visual line tagged with its speaker. A new speaker always begins
+// a new visual line (so a line is never two colors). Loses no characters.
 let measurer = null;
-function wrapIntoLines(text) {
+function wrapSegment(text) {
   if (!measurer) {
     measurer = document.createElement("div");
     measurer.setAttribute("aria-hidden", "true");
@@ -262,39 +386,50 @@ function wrapIntoLines(text) {
       "font-weight:800;letter-spacing:-.02em;line-height:1.28;white-space:normal;";
     stage.appendChild(measurer);
   }
-  // match the current line font metrics
   measurer.style.fontSize = getComputedStyle(document.documentElement).getPropertyValue("--size");
-
-  // split into words but KEEP the trailing spaces attached so nothing is dropped
   const tokens = text.match(/\S+\s*/g) || [];
   measurer.innerHTML = tokens.map((t) => `<span>${esc(t)}</span>`).join("");
   const spans = measurer.children;
-
   const lines = [];
   let cur = "", lastTop = null;
   for (let i = 0; i < spans.length; i++) {
     const top = spans[i].offsetTop;
-    if (lastTop !== null && top > lastTop) { lines.push(cur); cur = ""; } // wrapped
+    if (lastTop !== null && top > lastTop) { lines.push(cur); cur = ""; }
     cur += tokens[i];
     lastTop = top;
   }
   if (cur) lines.push(cur);
-  return lines.map((l) => l.replace(/\s+$/, "")); // trim trailing space per line
+  return lines.map((l) => l.replace(/\s+$/, ""));
+}
+
+// → array of { speaker, text } visual lines across all segments, in order.
+// Each line's color (speaker) is derived from its ACTUAL script, so a same-
+// language echo still gets the right color for what it contains. The direction
+// toggle (dirVisible) shows only the selected direction's session.
+function wrapAllSegments() {
+  const out = [];
+  for (const s of segments) {
+    if (!dirVisible(s.out)) continue;
+    const text = (s.shown + s.pending);
+    if (!text.trim()) continue;
+    for (const line of wrapSegment(text)) {
+      if (line.trim()) out.push({ speaker: speakerOf(line), text: line });
+    }
+  }
+  return out;
 }
 
 let prevLineCount = 0;
 function renderLines(lines) {
   const shown = lines.slice(-MAX_LINES);     // keep only the last N visual lines
-  // rebuild line divs
   linesEl.innerHTML = "";
-  shown.forEach((text, i) => {
+  shown.forEach((ln, i) => {
     const div = document.createElement("div");
-    div.className = "line" + (i === shown.length - 1 ? " current" : "");
-    div.textContent = text;
+    div.className = "line spk-" + ln.speaker + (i === shown.length - 1 ? " current" : "");
+    div.textContent = ln.text;
     linesEl.appendChild(div);
   });
-  // animate the glide only when the number of lines changed (a real line break);
-  // otherwise (current line just grew) snap instantly so it tracks center.
+  // glide only when the line count changed (a real line break); otherwise snap.
   centerCurrent(lines.length !== prevLineCount);
   prevLineCount = lines.length;
 }
@@ -325,121 +460,178 @@ function centerCurrent(animate) {
   });
 }
 
-// Save the full translation for the .txt download (called on stop).
-// Includes anything still queued so the memo is complete even if the on-screen
-// reveal hasn't caught up yet.
-function snapshotTranscript() {
-  const text = (fullText + pendingQueue).trim();
-  if (text) transcript = [{ t: 0, text }];
+// Build the .txt download body from the segments (called on stop). Includes
+// anything still queued so the memo is complete even if the on-screen reveal
+// hasn't caught up. Saves BOTH directions regardless of the live toggle — the
+// toggle is only a display comfort; the record should be the whole conversation.
+// Each turn is labeled with which language was spoken.
+const SPEAKER_LABEL = { en: "[EN→KO]", ko: "[KO→EN]" };
+function transcriptLines() {
+  return segments
+    .map((s) => { const text = (s.shown + s.pending).trim(); return { speaker: speakerOf(text), text }; })
+    .filter((s) => s.text);
 }
 
 // ---- connection ----
-// demo=true streams a bundled English sample (sample.pcm) instead of the mic,
-// so you can see the subtitles render with no microphone / no speaker.
+// Two translation sessions (ko-output + en-output) run at once, fed the same mic
+// audio. Both share the segment engine above; lines are colored by their actual
+// script at render time, not by which session produced them.
 async function start(demo = false) {
   $("#bigStart").disabled = true;
   $("#demoStart") && ($("#demoStart").disabled = true);
   setStatus(demo ? "데모 준비 중…" : "연결 중…");
   try {
-    // 1) get an ephemeral token from our Vercel function (key stays server-side)
+    // 1) get BOTH ephemeral tokens from our function (key stays server-side)
     const tokenRes = await fetch("/api/token");
     if (!tokenRes.ok) throw new Error("토큰 발급 실패 (" + tokenRes.status + ")");
-    const { token, error } = await tokenRes.json();
+    const { ko, en, error } = await tokenRes.json();
     if (error) throw new Error(error);
+    if (!ko || !en) throw new Error("토큰 응답이 올바르지 않습니다");
+    const tokens = { ko, en };
 
-    // 2) open WebSocket straight to OpenAI; auth via subprotocol (browsers
-    //    cannot set Authorization headers).
-    ws = new WebSocket(OPENAI_WS, ["realtime", "openai-insecure-api-key." + token]);
-
-    ws.onopen = () => {
-      // Confirm target language after the socket opens (it's also set at token
-      // creation). Minimal payload — verified working against the live API.
-      ws.send(JSON.stringify({
-        type: "session.update",
-        session: { audio: { output: { language: "ko" } } },
-      }));
-      if (demo) playDemo().catch((e) => setStatus("데모 오류: " + e.message));
-      else startMic().catch((e) => setStatus("마이크 오류: " + e.message));
-    };
-
-    ws.onmessage = (e) => {
-      let evt; try { evt = JSON.parse(e.data); } catch { return; }
-      switch (evt.type) {
-        case "session.updated":
-          setStatus("듣는 중…", true);
-          break;
-        case "session.output_transcript.delta":
-          // Queue it; the paced drain loop reveals it smoothly (no sentence
-          // parsing, so no character can be dropped at a boundary).
-          enqueueText(evt.delta ?? "");
-          break;
-        case "session.output_transcript.done":
-        case "session.output_transcript.completed": {
-          // The model sometimes sends a clean final transcript — if it's longer
-          // than everything we have (shown + queued), queue the remainder.
-          const have = fullText.length + pendingQueue.length;
-          if (evt.transcript && evt.transcript.length > have) {
-            enqueueText(evt.transcript.slice(have));
-          }
-          break;
-        }
-        case "session.closed":
-          // All pending translation has been flushed — the stream is complete.
-          setStatus("완료", false);
-          if (onClosed) { onClosed(); onClosed = null; }
-          break;
-        case "error":
-          setStatus("오류: " + (evt.error?.message ?? "unknown"));
-          break;
-      }
-    };
-    ws.onerror = () => setStatus("연결 오류");
-    ws.onclose = () => { setStatus("세션 종료됨"); stopMic(); };
-
-    // reveal stage
+    // reset engine + UI before sockets open
     hint.style.display = "none";
-    fullText = ""; pendingQueue = ""; prevLineCount = 0; linesEl.innerHTML = "";
+    dirBtn.classList.add("on");        // direction toggle is usable in demo + mic
+    segments = []; curSeg = null; prevLineCount = 0; linesEl.innerHTML = "";
     if (drainRAF) { cancelAnimationFrame(drainRAF); drainRAF = 0; }
     drainAcc = 0; lastDrain = 0;
-    closeSent = false; onClosed = null;
     pokeBar();
+
+    // 2) open both sessions; auth via subprotocol (browsers can't set headers)
+    let readyCount = 0;
+    for (const cfg of SESS) {
+      const s = { out: cfg.out, ws: null, closeSent: false, onClosed: null };
+      s.ws = new WebSocket(OPENAI_WS, ["realtime", "openai-insecure-api-key." + tokens[cfg.out]]);
+
+      s.ws.onopen = () => {
+        // confirm output language after the socket opens (also set at token creation)
+        s.ws.send(JSON.stringify({ type: "session.update", session: { audio: { output: { language: s.out } } } }));
+      };
+      s.ws.onmessage = (e) => {
+        let evt; try { evt = JSON.parse(e.data); } catch { return; }
+        switch (evt.type) {
+          case "session.updated":
+            if (++readyCount === SESS.length) setStatus(demo ? "데모 재생 중…" : "듣는 중…", true);
+            break;
+          case "session.output_transcript.delta":
+            pushDelta(s.out, evt.delta ?? "");
+            break;
+          case "session.output_transcript.done":
+          case "session.output_transcript.completed":
+            // If the model sent a clean final longer than what this turn holds,
+            // append the remainder; then close the turn so the next one is fresh.
+            if (evt.transcript) {
+              const have = currentTurnLen(s.out);
+              if (evt.transcript.length > have) pushDelta(s.out, evt.transcript.slice(have));
+            }
+            endSegment(s.out);
+            break;
+          case "session.closed":
+            if (s.onClosed) { s.onClosed(); s.onClosed = null; }
+            break;
+          case "error":
+            setStatus("오류: " + (evt.error?.message ?? "unknown"));
+            break;
+        }
+      };
+      s.ws.onerror = () => setStatus("연결 오류");
+      s.ws.onclose = () => { /* teardown handled centrally in stop() */ };
+      sessions[cfg.out] = s;
+    }
+
+    // 3) wait until both sockets are OPEN, then start feeding audio to both
+    await Promise.all(Object.values(sessions).map(waitOpen));
+    if (demo) playDemo().catch((e) => setStatus("데모 오류: " + e.message));
+    else startMic().catch((e) => setStatus("마이크 오류: " + e.message));
   } catch (e) {
     setStatus(e.message);
     $("#bigStart").disabled = false;
+    if ($("#demoStart")) $("#demoStart").disabled = false;
   }
 }
 
-// stream the bundled English sample through the same pipeline as the mic
+// length of the still-open turn for the session that outputs `out` (shown+pending),
+// for de-duping against that session's final transcript.
+function currentTurnLen(out) {
+  return (curSeg && curSeg.out === out) ? (curSeg.shown.length + curSeg.pending.length) : 0;
+}
+
+function waitOpen(s) {
+  return new Promise((resolve) => {
+    if (s.ws.readyState === WebSocket.OPEN) return resolve();
+    s.ws.addEventListener("open", () => resolve(), { once: true });
+    s.ws.addEventListener("error", () => resolve(), { once: true }); // don't hang
+  });
+}
+
+// send one audio chunk (base64) to BOTH sessions
+function sendAudioToAll(b64audio) {
+  for (const s of Object.values(sessions)) {
+    if (s.ws?.readyState === WebSocket.OPEN) {
+      s.ws.send(JSON.stringify({ type: "session.input_audio_buffer.append", audio: b64audio }));
+    }
+  }
+}
+
+// Decode raw PCM16 mono @24kHz into an AudioBuffer and play it through the
+// speakers, so the demo is AUDIBLE (you hear the EN↔KO sample as the subtitles
+// appear). Returns immediately; playback runs until the buffer ends or stop().
+function playDemoAudio(pcmBytes) {
+  try {
+    const RATE = 24000;
+    const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+    const n = Math.floor(pcmBytes.byteLength / 2);
+    demoAudioCtx = new AudioContext();
+    const buf = demoAudioCtx.createBuffer(1, n, RATE);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768; // LE int16 → float
+    demoSource = demoAudioCtx.createBufferSource();
+    demoSource.buffer = buf;
+    demoSource.connect(demoAudioCtx.destination);
+    demoSource.start();
+  } catch (e) {
+    console.warn("demo audio playback unavailable:", e.message); // subtitles still work
+  }
+}
+
+function stopDemoAudio() {
+  try { demoSource?.stop(); } catch {}
+  try { demoAudioCtx?.close(); } catch {}
+  demoSource = null; demoAudioCtx = null;
+}
+
+// stream the bundled demo sample through the same pipeline as the mic, AND play
+// it through the speakers. The sample is a short EN↔KO conversation; you HEAR
+// both languages, and the subtitles follow the direction toggle (default EN→KO,
+// i.e. Korean subtitles for the English turns) — flip the toggle to see the
+// English side. No microphone and no second person needed.
 async function playDemo() {
   setStatus("데모 재생 중…", true);
   sessionStart = performance.now();
-  transcript = [];
   const res = await fetch("/sample.pcm");
-  if (!res.ok) throw new Error("sample.pcm 없음 (npm run sample 후 public으로 복사)");
+  if (!res.ok) throw new Error("sample.pcm 없음 (npm run sample:convo 로 생성)");
   const pcm = new Uint8Array(await res.arrayBuffer());
+  playDemoAudio(pcm);                       // hear it through the speakers
   const RATE = 24000, MS = 40, BYTES = (RATE * 2 * MS) / 1000; // 40ms slices
   for (let off = 0; off < pcm.length; off += BYTES) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return; // stopped early
+    if (!anyOpen()) return; // stopped early
     const slice = pcm.subarray(off, Math.min(off + BYTES, pcm.length));
-    ws.send(JSON.stringify({ type: "session.input_audio_buffer.append", audio: b64(slice) }));
+    sendAudioToAll(b64(slice));
     await new Promise((r) => setTimeout(r, MS));
   }
-  // Tell the model the input is finished so it flushes the LAST sentence.
-  // Translation sessions hold the final segment until they get session.close
-  // (they keep waiting for more audio otherwise). The server then emits the
-  // remaining transcript deltas and finally session.closed.
   setStatus("데모 전송 완료 · 마무리 번역…", true);
-  await closeTranslation();   // resolves on session.closed (status → "완료")
+  await closeAllTranslations();
 }
+
+const anyOpen = () => Object.values(sessions).some((s) => s.ws?.readyState === WebSocket.OPEN);
 
 async function startMic() {
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
   });
 
-  // shared time origin for the recording and the transcript timestamps
+  // shared time origin for the recording
   sessionStart = performance.now();
-  transcript = [];
 
   // record the ORIGINAL mic audio (best quality) for download on stop
   recChunks = [];
@@ -465,11 +657,7 @@ async function startMic() {
   await audioCtx.audioWorklet.addModule("/pcm-worklet.js");
   const src = audioCtx.createMediaStreamSource(micStream);
   workletNode = new AudioWorkletNode(audioCtx, "pcm-worklet");
-  workletNode.port.onmessage = (e) => {
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "session.input_audio_buffer.append", audio: b64(e.data) }));
-    }
-  };
+  workletNode.port.onmessage = (e) => sendAudioToAll(b64(e.data)); // fan out to both sessions
   src.connect(workletNode);
   workletNode.connect(audioCtx.destination); // keep graph alive (no audible output)
 }
@@ -480,43 +668,48 @@ function stopMic() {
   try { audioCtx?.close(); } catch {}
 }
 
-// Send session.close so the model flushes its last sentence, and resolve once
-// session.closed arrives (or after a 4s safety timeout). Safe to call twice.
-let onClosed = null, closeSent = false;
-function closeTranslation() {
+// Send session.close to ONE session so the model flushes its last sentence, and
+// resolve once session.closed arrives (or after a 4s safety timeout). Idempotent.
+function closeSession(s) {
   return new Promise((resolve) => {
-    if (closeSent || !ws || ws.readyState !== WebSocket.OPEN) return resolve();
-    closeSent = true;
+    if (!s || s.closeSent || s.ws?.readyState !== WebSocket.OPEN) return resolve();
+    s.closeSent = true;
     let done = false;
     const finish = () => { if (!done) { done = true; resolve(); } };
-    onClosed = finish;
-    try { ws.send(JSON.stringify({ type: "session.close" })); } catch { return finish(); }
+    s.onClosed = finish;
+    try { s.ws.send(JSON.stringify({ type: "session.close" })); } catch { return finish(); }
     setTimeout(finish, 4000); // don't hang if the event never comes
   });
 }
 
+// Close BOTH sessions and wait for both to flush their final transcript.
+function closeAllTranslations() {
+  return Promise.all(Object.values(sessions).map(closeSession));
+}
+
 async function stop() {
   setStatus("마무리 번역…");
-  // 0) stop capturing, then tell the model input is done so it flushes the last
-  //    sentence, and wait for that final transcript before we snapshot/save.
+  // 0) stop capturing (mic + demo audio), then tell BOTH models input is done so
+  //    they flush their last sentence; wait for those finals before we save.
   stopMic();
-  await closeTranslation();
-  // 1) snapshot the (now complete) translation for the .txt memo, then reveal
-  //    anything still queued so the final on-screen text is complete too.
-  snapshotTranscript();
+  stopDemoAudio();
+  await closeAllTranslations();
+  // 1) reveal anything still queued so the final on-screen text is complete.
+  const lines = transcriptLines();   // snapshot for the .txt memo
   flushQueueNow();
   setStatus("저장 중…");
   // 2) flush the recorder and wait for the final blob before tearing down
   const audioBlob = await finishRecording();
-  if (ws?.readyState === WebSocket.OPEN) ws.close();
+  for (const s of Object.values(sessions)) { try { s.ws?.close(); } catch {} }
 
-  // 2) build a filename stamp like 20260629-1612
   const stamp = fileStamp();
 
-  // 3) save the Korean transcript memo (.txt)
-  if (transcript.length) {
-    const memo = buildMemo();
-    download(new Blob([memo], { type: "text/plain;charset=utf-8" }), `자막-${stamp}.txt`);
+  // 3) save the conversation transcript memo (.txt), labeled per direction.
+  // Prepend a UTF-8 BOM (﻿) so Windows Notepad / Excel auto-detect UTF-8
+  // instead of the system codepage (CP949) — without it Hangul shows as mojibake.
+  if (lines.length) {
+    const memo = "﻿" + buildMemo(lines);
+    download(new Blob([memo], { type: "text/plain;charset=utf-8" }), `대화-${stamp}.txt`);
   }
   // 4) save the original recording, if we captured any
   if (audioBlob && audioBlob.size) {
@@ -524,9 +717,10 @@ async function stop() {
     download(audioBlob, `녹음-${stamp}.${ext}`);
   }
 
-  setStatus(transcript.length || (audioBlob && audioBlob.size) ? "저장 완료 · 정지됨" : "정지됨");
+  setStatus(lines.length || (audioBlob && audioBlob.size) ? "저장 완료 · 정지됨" : "정지됨");
   $("#bigStart").disabled = false;
   if ($("#demoStart")) $("#demoStart").disabled = false;
+  dirBtn.classList.remove("on");     // hide the toggle back on the idle screen
   hint.style.display = "flex";
 }
 
@@ -543,9 +737,9 @@ function finishRecording() {
   });
 }
 
-function buildMemo() {
-  const header = `실시간 자막 기록 — ${dateStamp()}\n${"=".repeat(40)}\n\n`;
-  const body = transcript.map((l) => l.text).join("\n");
+function buildMemo(lines) {
+  const header = `실시간 통역 대화 기록 — ${dateStamp()}\n${"=".repeat(40)}\n\n`;
+  const body = lines.map((l) => `${SPEAKER_LABEL[l.speaker] || ""} ${l.text}`).join("\n");
   return header + body + "\n";
 }
 
@@ -578,6 +772,8 @@ function b64(buf) {
 $("#bigStart").onclick = () => start(false);
 $("#demoStart").onclick = () => start(true);
 $("#stop").onclick = stop;
+
+dirBtn.classList.add(dirMode); // set initial toggle color (EN→KO); stays hidden until start
 
 // re-center when the viewport changes (rotate / resize) — snap, no glide
 addEventListener("resize", () => relayout());
